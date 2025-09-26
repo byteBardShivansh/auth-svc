@@ -1,0 +1,19 @@
+{
+  "name": "employee-service",
+  "version": "1.0.0",
+  "description": "Simple employee management REST API with role-based access using Express",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
