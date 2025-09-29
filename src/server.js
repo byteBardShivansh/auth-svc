@@ -28,28 +28,31 @@ app.use(express.json());
 // Public endpoints: '/', '/health', '/favicon.ico', and OPTIONS are allowed without auth
 // If x-user corresponds to a predefined user, attach req.user
 app.use((req, res, next) => {
+  // Always attempt to resolve user from header if provided
+  const username = req.header('x-user');
+  if (username) {
+    const user = users[username];
+    if (!user) return res.status(401).json({ error: 'Unknown user' });
+    req.user = user;
+  }
 
-  // Make /employees and /employees/:id public (no x-user required)
-  if (
+  // Public endpoints
+  const isPublic = (
     req.method === 'OPTIONS' ||
     req.path === '/' ||
     req.path === '/health' ||
     req.path === '/favicon.ico' ||
-    req.path === '/employees' ||
-    (req.path.startsWith('/employees/') && req.path.split('/').length === 3)
-  ) {
-    return next();
-  }
+    (req.method === 'GET' && (
+      req.path === '/employees' ||
+      (req.path.startsWith('/employees/') && req.path.split('/').length === 3)
+    ))
+  );
 
-  const username = req.header('x-user');
-  if (!username) {
+  // Enforce auth only on protected endpoints
+  if (!isPublic && !req.user) {
     return res.status(401).json({ error: 'Missing x-user header' });
   }
-  const user = users[username];
-  if (!user) {
-    return res.status(401).json({ error: 'Unknown user' });
-  }
-  req.user = user;
+
   next();
 });
 
@@ -98,36 +101,40 @@ app.post('/employees', requireRole('Admin', 'Manager'), (req, res) => {
 
 // Update employee (Admin, Manager only if manages the employee)
 // Body: { name?, title?, email?, managerId? }
-app.put('/employees/:id', requireRole('Admin', 'Manager'), (req, res) => {
+app.put('/employees/:id', (req, res) => {
   const id = Number(req.params.id);
   const idx = findEmployeeIndex(id);
   if (idx === -1) return res.status(404).json({ error: 'Employee not found' });
   const existing = db.employees[idx];
 
-  // If Manager, ensure they manage this employee
-  if (req.user.role === 'Manager' && existing.managerId !== req.user.id) {
-    return res.status(403).json({ error: 'Managers can only update their direct reports' });
-  }
+  // Authorization: Admin OR Manager of this employee OR listed editor
+  const isAdmin = req.user.role === 'Admin';
+  const isManager = req.user.role === 'Manager';
+  const managesEmployee = isManager && existing.managerId === req.user.id;
+  const isListedEditor = Array.isArray(existing.editors) && existing.editors.includes(req.user.id);
 
-  // RBAC: Only allow edit if user is Admin, Manager (of this employee), or in editors list
-  if (
-    req.user.role !== 'Admin' &&
-    req.user.role !== 'Manager' &&
-    !(existing.editors && existing.editors.includes(req.user.id))
-  ) {
+  if (!(isAdmin || managesEmployee || isListedEditor)) {
     return res.status(403).json({ error: 'Forbidden: not allowed to edit this employee' });
   }
 
   const { name, title, email, managerId, viewers, editors } = req.body || {};
 
-  // Managers cannot reassign managerId away from themselves
+  // Only Admin or Manager can change managerId.
   let newManagerId = existing.managerId;
   if (typeof managerId !== 'undefined') {
-    if (req.user.role === 'Manager' && managerId !== req.user.id) {
-      return res.status(403).json({ error: 'Managers cannot reassign employees to a different manager' });
+    if (isAdmin) {
+      newManagerId = managerId;
+    } else if (isManager) {
+      if (managerId !== req.user.id) {
+        return res.status(403).json({ error: 'Managers cannot reassign employees to a different manager' });
+      }
+      newManagerId = managerId;
+    } else {
+      return res.status(403).json({ error: 'Only Admin/Manager can change managerId' });
     }
-    newManagerId = managerId;
   }
+
+  const allowAclChange = isAdmin || isManager;
 
   const updated = {
     ...existing,
@@ -135,8 +142,8 @@ app.put('/employees/:id', requireRole('Admin', 'Manager'), (req, res) => {
     ...(title ? { title } : {}),
     ...(email ? { email } : {}),
     managerId: newManagerId,
-    ...(Array.isArray(viewers) ? { viewers } : {}),
-    ...(Array.isArray(editors) ? { editors } : {}),
+    ...(allowAclChange && Array.isArray(viewers) ? { viewers } : {}),
+    ...(allowAclChange && Array.isArray(editors) ? { editors } : {}),
   };
 
   db.employees[idx] = updated;
@@ -220,6 +227,23 @@ app.get('/', (req, res) => {
 
 // Health (public)
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
+// Who am I (protected)
+app.get('/me', (req, res) => {
+  if (!req.user) return res.status(401).json({ error: 'Missing x-user header' });
+  res.json({ user: req.user });
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not Found' });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error(err);
+  const status = err.status || 500;
+  res.status(status).json({ error: err.message || 'Internal Server Error' });
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
